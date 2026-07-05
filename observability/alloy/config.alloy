@@ -1,0 +1,81 @@
+// Grafana Alloy — the single collection point for the showcase.
+//
+//   metrics : scrape the app's /actuator/prometheus  ->  remote_write to Mimir
+//   traces  : receive OTLP from the app  ->  tail-sample (keep ALL failures)  ->  Tempo
+
+logging {
+  level  = "info"
+  format = "logfmt"
+}
+
+// ---------------------------------------------------------------------------
+// METRICS: scrape the Spring Boot app and remote-write to Mimir
+// ---------------------------------------------------------------------------
+prometheus.scrape "showcase" {
+  targets = [
+    { "__address__" = "app:8080", "job" = "showcase", "instance" = "app:8080" },
+  ]
+  metrics_path    = "/actuator/prometheus"
+  scrape_interval = "10s"
+  scrape_timeout  = "5s"
+  forward_to      = [prometheus.remote_write.mimir.receiver]
+}
+
+prometheus.remote_write "mimir" {
+  endpoint {
+    url = "http://mimir:9009/api/v1/push"
+  }
+}
+
+// ---------------------------------------------------------------------------
+// TRACES: OTLP in -> tail sampling -> Tempo
+// ---------------------------------------------------------------------------
+otelcol.receiver.otlp "default" {
+  grpc { endpoint = "0.0.0.0:4317" }
+  http { endpoint = "0.0.0.0:4318" }
+
+  // We keep EVERY trace (the app samples at 100%). Every traceId that appears in a log
+  // line therefore resolves to a real trace in Tempo — no dangling "not found" links.
+  // Failing requests are, of course, included.
+  output {
+    traces = [otelcol.exporter.otlp.tempo.input]
+  }
+}
+
+// ---------------------------------------------------------------------------
+// OPTIONAL: tail-based sampling to reduce trace volume while STILL keeping every
+// failure. Trade-off: successful traces that get dropped will still have their
+// traceId in the logs, so those log->trace links will say "not found" in Tempo
+// (the drop decision happens after the log line was already written). To enable,
+// point the receiver's `output.traces` at `otelcol.processor.tail_sampling.errors.input`.
+//
+// otelcol.processor.tail_sampling "errors" {
+//   decision_wait = "10s"
+//   policy {                                   // 5xx -> span status ERROR
+//     name = "keep-span-errors"
+//     type = "status_code"
+//     status_code { status_codes = ["ERROR"] }
+//   }
+//   policy {                                   // 4xx + 5xx via Spring's "outcome" tag (catches 404s)
+//     name = "keep-failed-http-outcome"
+//     type = "string_attribute"
+//     string_attribute {
+//       key    = "outcome"
+//       values = ["CLIENT_ERROR", "SERVER_ERROR"]
+//     }
+//   }
+//   policy {                                   // a slice of healthy traffic
+//     name = "sample-healthy-traffic"
+//     type = "probabilistic"
+//     probabilistic { sampling_percentage = 20 }
+//   }
+//   output { traces = [otelcol.exporter.otlp.tempo.input] }
+// }
+// ---------------------------------------------------------------------------
+
+otelcol.exporter.otlp "tempo" {
+  client {
+    endpoint = "tempo:4317"
+    tls { insecure = true }
+  }
+}

@@ -1,0 +1,53 @@
+# Mimir — single-binary (-target=all), TSDB blocks stored in MinIO (S3).
+multitenancy_enabled: false
+
+server:
+  http_listen_port: 9009
+  grpc_listen_port: 9095
+  log_level: info
+
+# Shared S3 connection details; per-component buckets are set below.
+common:
+  storage:
+    backend: s3
+    s3:
+      endpoint: minio:9000
+      access_key_id: ${MINIO_ROOT_USER}
+      secret_access_key: ${MINIO_ROOT_PASSWORD}
+      insecure: true
+
+blocks_storage:
+  backend: s3
+  s3:
+    bucket_name: mimir-blocks
+  tsdb:
+    dir: /data/tsdb
+  bucket_store:
+    sync_dir: /data/tsdb-sync
+
+ruler_storage:
+  backend: s3
+  s3:
+    bucket_name: mimir-ruler
+
+# Single-replica everything (dev / single-node friendly).
+ingester:
+  ring:
+    replication_factor: 1
+
+store_gateway:
+  sharding_ring:
+    replication_factor: 1
+
+# Accept remote-write from Alloy and Tempo, keep exemplars for trace correlation,
+# tolerate the slightly out-of-order samples that span metrics can produce.
+limits:
+  ingestion_rate: 100000
+  ingestion_burst_size: 200000
+  max_global_series_per_user: 0
+  max_global_exemplars_per_user: 100000
+  out_of_order_time_window: 10m
+  native_histograms_ingestion_enabled: true
+
+usage_stats:
+  enabled: false

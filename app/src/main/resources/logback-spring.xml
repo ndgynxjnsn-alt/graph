@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<configuration>
+    <include resource="org/springframework/boot/logging/logback/defaults.xml"/>
+
+    <springProperty scope="context" name="appName" source="spring.application.name"/>
+    <springProperty scope="context" name="lokiUrl" source="loki.url"/>
+
+    <!-- Human-readable console output; includes the trace/span id injected into MDC by Micrometer Tracing -->
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} %-5level [%thread] traceId=%X{traceId:-} spanId=%X{spanId:-} %logger{36} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <!-- Push logs straight to Loki. traceId lives both in structured metadata and in the
+         message text so Grafana can link a log line to its trace. -->
+    <appender name="LOKI" class="com.github.loki4j.logback.Loki4jAppender">
+        <http>
+            <url>${lokiUrl}</url>
+        </http>
+        <format>
+            <label>
+                <pattern>app=${appName},level=%level</pattern>
+            </label>
+            <message>
+                <!-- traceId is embedded here so a Grafana derived field can link a log line to its trace -->
+                <pattern>%-5level [%thread] traceId=%X{traceId:-none} %logger{36} - %msg%n</pattern>
+            </message>
+        </format>
+    </appender>
+
+    <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+        <appender-ref ref="LOKI"/>
+    </root>
+</configuration>

@@ -1,0 +1,38 @@
+spring:
+  application:
+    name: showcase
+
+server:
+  port: 8080
+
+management:
+  endpoints:
+    web:
+      exposure:
+        # /actuator/prometheus is scraped by Alloy; the rest are handy for debugging
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always
+  # Attach service.name etc. as resource attributes / common tags
+  metrics:
+    tags:
+      application: ${spring.application.name}
+    distribution:
+      # Emit histogram buckets so Grafana can compute latency percentiles/heatmaps server-side
+      percentiles-histogram:
+        http.server.requests: true
+      slo:
+        http.server.requests: 50ms,100ms,200ms,400ms,800ms,1s,2s
+  tracing:
+    sampling:
+      # Record 100% at the app; Alloy does tail-based sampling (keeps ALL errors + a slice of the rest)
+      probability: 1.0
+  otlp:
+    tracing:
+      # OTLP/HTTP endpoint of the Alloy collector (override with MANAGEMENT_OTLP_TRACING_ENDPOINT)
+      endpoint: ${OTLP_TRACING_ENDPOINT:http://localhost:4318/v1/traces}
+
+# Endpoint the Loki logback appender pushes to (see logback-spring.xml)
+loki:
+  url: ${LOKI_URL:http://localhost:3100/loki/api/v1/push}

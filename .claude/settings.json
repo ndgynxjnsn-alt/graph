@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s -G 'http://localhost:3200/api/search' --data-urlencode 'q={name=\"http get /**\"}' --data-urlencode 'limit=20')",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); attrs=set\\(\\); [attrs.add\\(a['key']\\) for b in d.get\\('batches',[]\\) for ss in b.get\\('scopeSpans',[]\\) for sp in ss.get\\('spans',[]\\) for a in sp.get\\('attributes',[]\\)]; print\\('span attr keys:', sorted\\(attrs\\)\\)\")",
+      "Bash(curl -s http://localhost:3000/api/health)",
+      "Bash(curl -s -u admin:admin http://localhost:3000/api/datasources)",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); [print\\(' ',x['name'],x['type'],'uid='+x['uid']\\) for x in d]\")",
+      "Bash(curl -s -u admin:admin 'http://localhost:3000/api/search?query=Spring%20Boot%20Showcase')",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); [print\\(' ',x['title'],'-> uid',x['uid']\\) for x in d]\")",
+      "Bash(docker run *)",
+      "Bash(curl -s -G 'http://localhost:3100/loki/api/v1/query_range' --data-urlencode 'query={app=\"showcase\",level=\"ERROR\"}' --data-urlencode 'limit=8')",
+      "Bash(python3 -c ' *)",
+      "Bash(curl -s -G 'http://localhost:3100/loki/api/v1/query_range' --data-urlencode 'query={app=\"showcase\",level=\"INFO\"}' --data-urlencode 'limit=4')",
+      "Bash(timeout 300 docker build -t showcase-app:latest .)",
+      "Bash(docker rm *)"
+    ]
+  }
+}

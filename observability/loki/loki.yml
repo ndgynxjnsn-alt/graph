@@ -1,0 +1,50 @@
+# Loki — single-binary mode, chunks + index stored in MinIO (S3), TSDB schema v13.
+auth_enabled: false
+
+server:
+  http_listen_port: 3100
+  grpc_listen_port: 9096
+  log_level: info
+
+common:
+  instance_addr: 127.0.0.1
+  path_prefix: /loki
+  replication_factor: 1
+  ring:
+    kvstore:
+      store: inmemory
+  storage:
+    s3:
+      endpoint: minio:9000
+      bucketnames: loki-data
+      access_key_id: ${MINIO_ROOT_USER}
+      secret_access_key: ${MINIO_ROOT_PASSWORD}
+      s3forcepathstyle: true
+      insecure: true
+
+schema_config:
+  configs:
+    - from: 2024-01-01
+      store: tsdb
+      object_store: s3
+      schema: v13
+      index:
+        prefix: index_
+        period: 24h
+
+limits_config:
+  allow_structured_metadata: true
+  reject_old_samples: false
+  retention_period: 168h
+  volume_enabled: true
+
+compactor:
+  working_directory: /loki/compactor
+  retention_enabled: true
+  delete_request_store: s3
+
+pattern_ingester:
+  enabled: true
+
+analytics:
+  reporting_enabled: false
