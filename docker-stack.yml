@@ -1,20 +1,32 @@
-# Grafana LGTM showcase for a Spring Boot app.
+# Docker SWARM stack file for the Grafana LGTM showcase.
 #
-#   app      -> Spring Boot sample (metrics + OTLP traces + Loki logs)
-#   alloy    -> scrapes app metrics into Mimir; receives OTLP traces, tail-samples, forwards to Tempo
-#   mimir    -> metrics store        (S3 backend -> MinIO)
-#   loki     -> logs store           (S3 backend -> MinIO)
-#   tempo    -> traces store         (S3 backend -> MinIO)
-#   minio    -> S3-compatible object storage for all three
-#   grafana  -> dashboards + datasources (provisioned)
-#   loadgen  -> fires a mix of good/bad requests at the app
+#   docker stack deploy -c docker-stack.yml showcase
 #
-# Local dev:  docker compose up -d --build
-# Swarm:      see README.md (build/push the app image first, then `docker stack deploy`)
+# Differences from docker-compose.yml (swarm ignores build/depends_on conditions):
+#   - the app image must already exist on every node (build + push to a registry,
+#     or `docker save | docker load` on a single-node swarm)
+#   - config files are shipped as swarm `configs` instead of bind mounts
+#   - startup ordering is handled by restart policies: services crash-loop
+#     until their dependencies (MinIO buckets, etc.) become available
+#
+# Swarm networking note: tasks on an overlay network get MULTIPLE interfaces
+# (overlay + ingress when ports are published). Loki/Tempo/Mimir autodetect
+# their ring/memberlist advertise address and can pick the wrong interface —
+# the classic "my own components can't talk to each other" swarm failure.
+# The fix lives in the config files themselves: every ring is pinned to
+# 127.0.0.1 (single-binary mode only needs to reach itself). See
+# observability/{loki,tempo,mimir}/*.yml.
+
+version: "3.8"
 
 x-minio-env: &minio-env
-  MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
-  MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+  MINIO_ROOT_USER: minioadmin
+  MINIO_ROOT_PASSWORD: minioadmin
+
+x-restart: &always-restart
+  restart_policy:
+    condition: any
+    delay: 3s
 
 services:
   # -------------------------------------------------------------------------
@@ -26,18 +38,16 @@ services:
     environment:
       <<: *minio-env
     ports:
-      - "9000:9000"   # S3 API
-      - "9001:9001"   # web console
+      - "9001:9001"
     volumes:
       - minio-data:/data
     networks: [showcase]
+    deploy:
+      <<: *always-restart
 
-  # One-shot: create the buckets Mimir/Loki/Tempo need, then exit.
+  # One-shot: create the buckets, then exit (restart_policy none = don't rerun).
   minio-init:
     image: minio/mc:latest
-    depends_on:
-      minio:
-        condition: service_started
     environment:
       <<: *minio-env
     entrypoint:
@@ -50,54 +60,61 @@ services:
         mc mb --ignore-existing local/mimir-blocks local/mimir-ruler local/loki-data local/tempo-data
         echo 'buckets ready'
     networks: [showcase]
+    deploy:
+      restart_policy:
+        condition: on-failure
+        delay: 3s
 
   # -------------------------------------------------------------------------
-  # Metrics / Logs / Traces backends
+  # Metrics / Logs / Traces backends (S3 -> MinIO)
   # -------------------------------------------------------------------------
   mimir:
     image: grafana/mimir:2.15.0
     command: ["-config.file=/etc/mimir/mimir.yml", "-config.expand-env=true"]
     environment:
       <<: *minio-env
+    configs:
+      - source: mimir_cfg
+        target: /etc/mimir/mimir.yml
     volumes:
-      - ./observability/mimir/mimir.yml:/etc/mimir/mimir.yml:ro
       - mimir-data:/data
     ports:
       - "9009:9009"
-    depends_on:
-      minio-init:
-        condition: service_completed_successfully
     networks: [showcase]
+    deploy:
+      <<: *always-restart
 
   loki:
     image: grafana/loki:3.4.2
     command: ["-config.file=/etc/loki/loki.yml", "-config.expand-env=true"]
     environment:
       <<: *minio-env
+    configs:
+      - source: loki_cfg
+        target: /etc/loki/loki.yml
     volumes:
-      - ./observability/loki/loki.yml:/etc/loki/loki.yml:ro
       - loki-data:/loki
     ports:
       - "3100:3100"
-    depends_on:
-      minio-init:
-        condition: service_completed_successfully
     networks: [showcase]
+    deploy:
+      <<: *always-restart
 
   tempo:
     image: grafana/tempo:2.7.1
     command: ["-config.file=/etc/tempo/tempo.yml", "-config.expand-env=true"]
     environment:
       <<: *minio-env
+    configs:
+      - source: tempo_cfg
+        target: /etc/tempo/tempo.yml
     volumes:
-      - ./observability/tempo/tempo.yml:/etc/tempo/tempo.yml:ro
       - tempo-data:/var/tempo
     ports:
-      - "3200:3200"   # Tempo API / query
-    depends_on:
-      minio-init:
-        condition: service_completed_successfully
+      - "3200:3200"
     networks: [showcase]
+    deploy:
+      <<: *always-restart
 
   # -------------------------------------------------------------------------
   # Collector
@@ -109,23 +126,22 @@ services:
       - --server.http.listen-addr=0.0.0.0:12345
       - --storage.path=/var/lib/alloy/data
       - /etc/alloy/config.alloy
-    volumes:
-      - ./observability/alloy/config.alloy:/etc/alloy/config.alloy:ro
-    ports:
-      - "12345:12345"   # Alloy UI
-    depends_on:
-      mimir:
-        condition: service_started
-      tempo:
-        condition: service_started
+    configs:
+      - source: alloy_cfg
+        target: /etc/alloy/config.alloy
     networks: [showcase]
+    deploy:
+      <<: *always-restart
 
   # -------------------------------------------------------------------------
   # Continuous profiling
   # -------------------------------------------------------------------------
   pyroscope:
     image: grafana/pyroscope:1.13.1
-    # Loopback ring pinning — required on swarm (multi-interface tasks), harmless here.
+    # Same multi-interface swarm problem as Loki/Tempo/Mimir: with a published port,
+    # the task sits on ingress + overlay, and Pyroscope advertises the wrong address
+    # to its own components (visible as "rpc error: ... dial tcp <ingress-ip>:4040:
+    # i/o timeout" in the service logs). Pin every ring to loopback.
     command:
       - -memberlist.bind-addr=127.0.0.1
       - -memberlist.advertise-addr=127.0.0.1
@@ -141,6 +157,8 @@ services:
     volumes:
       - pyroscope-data:/data
     networks: [showcase]
+    deploy:
+      <<: *always-restart
 
   # -------------------------------------------------------------------------
   # Grafana
@@ -148,55 +166,47 @@ services:
   grafana:
     image: grafana/grafana:11.6.0
     environment:
-      GF_SECURITY_ADMIN_USER: ${GF_ADMIN_USER:-admin}
-      GF_SECURITY_ADMIN_PASSWORD: ${GF_ADMIN_PASSWORD:-admin}
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
       GF_USERS_DEFAULT_THEME: dark
       GF_FEATURE_TOGGLES_ENABLE: traceqlEditor
       GF_LOG_LEVEL: warn
+    configs:
+      - source: grafana_datasources
+        target: /etc/grafana/provisioning/datasources/datasources.yml
+      - source: grafana_dashboard_provider
+        target: /etc/grafana/provisioning/dashboards/dashboards.yml
+      - source: grafana_dashboard_app
+        target: /etc/dashboards/spring-boot.json
     volumes:
-      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./observability/grafana/dashboards:/etc/dashboards:ro
       - grafana-data:/var/lib/grafana
     ports:
       - "3000:3000"
-    depends_on:
-      mimir:
-        condition: service_started
-      loki:
-        condition: service_started
-      tempo:
-        condition: service_started
     networks: [showcase]
+    deploy:
+      <<: *always-restart
 
   # -------------------------------------------------------------------------
   # The application under observation
   # -------------------------------------------------------------------------
   app:
-    build:
-      context: ./app
     image: showcase-app:latest
     environment:
       OTLP_TRACING_ENDPOINT: http://alloy:4318/v1/traces
       LOKI_URL: http://loki:3100/loki/api/v1/push
       JAVA_OPTS: "-XX:MaxRAMPercentage=75.0"
-      # Pyroscope agent (baked into the image; only attaches when this is set)
       PYROSCOPE_SERVER_ADDRESS: http://pyroscope:4040
       PYROSCOPE_APPLICATION_NAME: showcase
       PYROSCOPE_PROFILER_ALLOC: 512k
       PYROSCOPE_PROFILER_LOCK: 10ms
     ports:
       - "8080:8080"
-    depends_on:
-      alloy:
-        condition: service_started
-      loki:
-        condition: service_started
-      pyroscope:
-        condition: service_started
     networks: [showcase]
+    deploy:
+      <<: *always-restart
 
   # -------------------------------------------------------------------------
-  # Load testing (Grafana k6)
+  # Load testing (Grafana k6). Runs for DURATION, then swarm restarts it.
   # -------------------------------------------------------------------------
   k6:
     image: grafana/k6:0.57.0
@@ -204,13 +214,30 @@ services:
     environment:
       TARGET: http://app:8080
       RATE: "3"
-    volumes:
-      - ./k6/load.js:/scripts/load.js:ro
-    depends_on:
-      app:
-        condition: service_started
-    restart: unless-stopped
+    configs:
+      - source: k6_script
+        target: /scripts/load.js
     networks: [showcase]
+    deploy:
+      <<: *always-restart
+
+configs:
+  mimir_cfg:
+    file: ./observability/mimir/mimir.yml
+  loki_cfg:
+    file: ./observability/loki/loki.yml
+  tempo_cfg:
+    file: ./observability/tempo/tempo.yml
+  alloy_cfg:
+    file: ./observability/alloy/config.alloy
+  grafana_datasources:
+    file: ./observability/grafana/provisioning/datasources/datasources.yml
+  grafana_dashboard_provider:
+    file: ./observability/grafana/provisioning/dashboards/dashboards.yml
+  grafana_dashboard_app:
+    file: ./observability/grafana/dashboards/spring-boot.json
+  k6_script:
+    file: ./k6/load.js
 
 volumes:
   minio-data:
@@ -222,4 +249,4 @@ volumes:
 
 networks:
   showcase:
-    driver: bridge
+    driver: overlay

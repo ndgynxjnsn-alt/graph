@@ -30,6 +30,13 @@ datasources:
           url: '$${__value.raw}'
           datasourceUid: tempo
 
+  # ---- Continuous profiling ----
+  - name: Pyroscope
+    uid: pyroscope
+    type: grafana-pyroscope-datasource
+    access: proxy
+    url: http://pyroscope:4040
+
   # ---- Traces ----
   - name: Tempo
     uid: tempo

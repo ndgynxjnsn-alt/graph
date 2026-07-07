@@ -15,7 +15,17 @@ distributor:
         http:
           endpoint: 0.0.0.0:4318
 
+# Pin the ring to loopback. On Docker Swarm, tasks have several interfaces
+# (overlay + ingress when ports are published) and Tempo's address autodetection
+# can pick the wrong one, breaking ring communication. Single-binary Tempo only
+# needs to reach itself, so loopback + an in-memory ring is always correct.
 ingester:
+  lifecycler:
+    address: 127.0.0.1
+    ring:
+      kvstore:
+        store: inmemory
+      replication_factor: 1
   max_block_duration: 5m
 
 compactor:

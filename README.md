@@ -1,10 +1,11 @@
 # Grafana LGTM showcase for Spring Boot
 
 A self-contained observability demo: a small **Spring Boot 3** app (Java 25) instrumented for
-**metrics, logs and traces**, wired into a full **Grafana LGTM** stack — **L**oki (logs),
-**G**rafana (dashboards), **T**empo (traces) and **M**imir (metrics) — all backed by **MinIO**
-as S3 object storage, plus **Grafana Alloy** as the single collector. A load generator fires a
-mix of good and failing requests so there is always something to look at.
+**metrics, logs, traces and continuous profiling**, wired into a full **Grafana LGTM+P** stack —
+**L**oki (logs), **G**rafana (dashboards), **T**empo (traces), **M**imir (metrics) and
+**P**yroscope (profiles) — the storage backends all using **MinIO** as S3 object storage, plus
+**Grafana Alloy** as the single collector. A **k6** load test fires a mix of good and failing
+requests so there is always something to look at.
 
 ```
                  ┌────────── metrics (scrape /actuator/prometheus) ──────────┐
@@ -25,9 +26,10 @@ mix of good and failing requests so there is always something to look at.
 | **Mimir** | Metrics store | http://localhost:9009 |
 | **Loki** | Logs store | http://localhost:3100 |
 | **Tempo** | Traces store | http://localhost:3200 |
+| **Pyroscope** | Continuous profiling store | http://localhost:4040 |
 | **Alloy** | Collector (scrape + OTLP receiver) | http://localhost:12345 |
-| **MinIO** | S3 storage for all three backends | http://localhost:9001 (`minioadmin` / `minioadmin`) |
-| **loadgen** | Generates traffic (incl. 404s / 500s) | — |
+| **MinIO** | S3 storage for Mimir/Loki/Tempo | http://localhost:9001 (`minioadmin` / `minioadmin`) |
+| **k6** | Load test (incl. 404s / 500s) | — |
 
 ## Requirements
 
@@ -112,6 +114,34 @@ clickable link straight to the trace in Tempo, and from a Tempo span you can jum
 matching logs in Loki. Open **Explore → Loki**, query `{app="showcase"}`, expand a line and click
 the **TraceID** link.
 
+## Continuous profiling (Pyroscope)
+
+The app image ships with the **Grafana Pyroscope Java agent** (async-profiler based: CPU,
+allocation and lock profiling). The agent only attaches when `PYROSCOPE_SERVER_ADDRESS` is set,
+so the image also runs fine standalone.
+
+The agent jar is downloaded at image build time (pinned version). The same download by hand:
+
+```bash
+curl -fL -o pyroscope.jar https://github.com/grafana/pyroscope-java/releases/download/v2.8.0/pyroscope.jar
+```
+
+Explore profiles in Grafana: **Explore → Pyroscope datasource → `process_cpu` → 
+`service_name="showcase"`** — or open http://localhost:4040 directly. Flamegraphs show exactly
+where the app burns CPU / allocates under the k6 load.
+
+## Load testing (Grafana k6)
+
+[`k6/load.js`](k6/load.js) drives a constant-arrival-rate mix (~3 req/s by default): ~60%
+success, plus deliberate 404s, 400s-ish flaky calls and 500s, with checks and thresholds. Tune
+via env vars on the `k6` service: `TARGET`, `RATE` (req/s), `DURATION`.
+
+Run a one-off, heavier blast by hand:
+
+```bash
+docker compose run --rm -e RATE=20 -e DURATION=2m k6 run --quiet /scripts/load.js
+```
+
 ## Rebuild after changing the app
 
 ```bash
@@ -135,55 +165,86 @@ cd app
 ./mvnw clean package           # produces target/showcase-0.0.1-SNAPSHOT.jar
 ```
 
-## Running on a 5-node Docker Swarm
+## Running on Docker Swarm
 
-The stack is a standard Compose file; a few things change when moving from `docker compose` (one
-host) to `docker stack deploy` (a swarm):
+There is a dedicated, **swarm-tested** stack file: [`docker-stack.yml`](docker-stack.yml). It was
+verified end-to-end on a real single-node swarm on this machine (all four signals flowing, rings
+healthy, zero gRPC errors).
 
-1. **Build and push the app image to a registry** the swarm can pull from — `docker stack deploy`
-   does not build images:
-   ```bash
-   docker build -t <registry>/showcase-app:latest ./app
-   docker push <registry>/showcase-app:latest
-   ```
-   Then set `image: <registry>/showcase-app:latest` for the `app` service (and drop `build:`).
+```bash
+# 1. The app image must exist on every node — swarm does not build.
+docker build -t showcase-app:latest ./app
+#    Multi-node: tag + push to a registry instead, and update `image:` in docker-stack.yml.
 
-2. **Deploy the stack:**
-   ```bash
-   docker stack deploy -c docker-compose.yml showcase
-   ```
-   Note: `docker stack deploy` ignores `build:`, `depends_on`, `restart:` and bind-mount relative
-   paths behave differently — put the config files on a shared path or ship them as Docker
-   [configs](https://docs.docker.com/reference/cli/docker/config/) / mounted volumes available on
-   every node.
+# 2. Deploy. If your NIC has several addresses (e.g. multiple IPv6), swarm init
+#    refuses to guess — pass the node's IPv4 explicitly.
+docker swarm init --advertise-addr <node-ipv4>
+docker stack deploy -c docker-stack.yml showcase
 
-3. **Storage & placement.** MinIO, Mimir, Loki and Tempo keep local state (WAL / TSDB) in volumes.
-   Pin each stateful service to a specific node with a `deploy.placement.constraints` rule (e.g.
-   `node.hostname == node-1`) so it always finds its data, or back the volumes with shared/network
-   storage. MinIO can also be run as a distributed deployment across nodes for real HA.
+# 3. Watch it converge (backends crash-loop politely until MinIO buckets exist)
+docker service ls
+```
 
-4. **Scaling the app.** If you scale the `app` service to multiple replicas, replace Alloy's
-   static scrape target (`app:8080`) with service discovery
-   (`discovery.dns` on the Swarm `tasks.app` DNS name) so every replica is scraped.
+### The Loki/Tempo/Mimir swarm networking problem — and the fix
 
-Because the app talks to Alloy/Loki by service name over OTLP/HTTP, the observability wiring works
-unchanged on the swarm overlay network.
+On swarm, tasks attached to an overlay network get **multiple interfaces** (the overlay, plus the
+ingress network whenever ports are published). Loki, Tempo, Mimir — and Pyroscope, which shares
+the same architecture — autodetect the address they advertise to their own ring/memberlist, and
+routinely pick the wrong interface. Result: the components of a service can't reach *each other*,
+even though external clients can reach the service fine. In `docker service logs` it shows up as
+gRPC errors like:
+
+```
+rpc error: code = Unavailable desc = ... dial tcp 10.0.0.8:4040: i/o timeout
+```
+
+(`10.0.0.x` = the ingress network — the service is dialling *itself* on the wrong interface.
+This exact failure was reproduced on this machine's swarm with an unpinned Pyroscope.)
+
+The fix in this repo: every ring is **pinned to `127.0.0.1`** — a single-binary instance only
+ever needs to reach itself, so loopback is always right, regardless of how many NICs swarm
+attaches. For Loki/Tempo/Mimir it lives in their config files
+([`loki.yml`](observability/loki/loki.yml), [`tempo.yml`](observability/tempo/tempo.yml),
+[`mimir.yml`](observability/mimir/mimir.yml)); for Pyroscope it's CLI flags on the service
+(see `docker-stack.yml`). If you later scale a backend to multiple replicas (microservices mode),
+replace the loopback pinning with `instance_interface_names` (e.g. `[eth0]`) or DNS-based
+memberlist join on `tasks.<service>` with `endpoint_mode: dnsrr`.
+
+### Other swarm notes
+
+- `docker stack deploy` ignores `build:` and `depends_on:`; ordering is handled by restart
+  policies (services retry until MinIO/buckets are up). Config files ship as swarm `configs`.
+- **Storage & placement (multi-node):** pin each stateful service (MinIO, Mimir, Loki, Tempo,
+  Grafana, Pyroscope) to a node via `deploy.placement.constraints` so it finds its volume again,
+  or use shared storage. MinIO can run distributed across nodes for real HA.
+- **Scaling the app:** with multiple `app` replicas, replace Alloy's static scrape target with
+  DNS discovery of `tasks.app` so every replica is scraped.
+- **⚠️ IPv6 and the routing mesh:** published swarm ports listen dual-stack, but on this host
+  only IPv4 is actually forwarded — requests to `http://localhost:<port>` can hang because
+  `localhost` resolves to `::1` first. Use `http://127.0.0.1:<port>` (or the node's IPv4)
+  when curling published services.
+- **⚠️ Snap-packaged Docker cannot run swarm workloads.** If Docker was installed via
+  `snap install docker`, every swarm task fails with
+  `mkdir /var/lib/docker: read-only file system` (the swarm executor writes task state under a
+  path the snap confines; plain `docker run`/compose is unaffected). Install Docker from apt
+  on all swarm nodes.
 
 ## Layout
 
 ```
 .
-├── docker-compose.yml            # wires the whole stack together
-├── app/                          # Spring Boot app + Dockerfile
-│   ├── src/main/java/...         # controllers + config
+├── docker-compose.yml            # local dev: wires the whole stack together
+├── docker-stack.yml              # swarm: same stack via `docker stack deploy` (swarm-tested)
+├── app/                          # Spring Boot app + Dockerfile (incl. Pyroscope Java agent)
+│   ├── src/main/java/...         # controllers + error handling
 │   └── src/main/resources/       # application.yml, logback-spring.xml (Loki appender)
-├── loadgen/loadgen.sh            # traffic generator (busybox sh)
+├── k6/load.js                    # Grafana k6 load test
 └── observability/
-    ├── alloy/config.alloy        # scrape -> Mimir; OTLP -> tail sample -> Tempo
-    ├── mimir/mimir.yml           # metrics, S3 backend
-    ├── loki/loki.yml             # logs, S3 backend
-    ├── tempo/tempo.yml           # traces, S3 backend
+    ├── alloy/config.alloy        # scrape -> Mimir; OTLP -> Tempo
+    ├── mimir/mimir.yml           # metrics, S3 backend (rings pinned to loopback for swarm)
+    ├── loki/loki.yml             # logs, S3 backend (          "          )
+    ├── tempo/tempo.yml           # traces, S3 backend (         "          )
     └── grafana/
-        ├── provisioning/         # datasources + dashboard provider
+        ├── provisioning/         # datasources (Mimir/Loki/Tempo/Pyroscope) + dashboard provider
         └── dashboards/           # Spring Boot Showcase dashboard
 ```

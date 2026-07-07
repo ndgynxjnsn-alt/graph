@@ -12,6 +12,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.server.ResponseStatusException;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 /**
  * Handles exceptions <em>inside</em> the request's trace scope. This matters for two reasons:
@@ -30,6 +31,12 @@ public class GlobalExceptionHandler {
 	@ExceptionHandler(ResponseStatusException.class)
 	public ResponseEntity<Map<String, Object>> handle(ResponseStatusException ex) {
 		return build(ex.getStatusCode(), ex.getReason(), ex);
+	}
+
+	/** Unmapped paths must stay a 404 — don't let the catch-all below turn them into a 500. */
+	@ExceptionHandler(NoResourceFoundException.class)
+	public ResponseEntity<Map<String, Object>> handle(NoResourceFoundException ex) {
+		return build(HttpStatus.NOT_FOUND, "No endpoint: /" + ex.getResourcePath(), ex);
 	}
 
 	@ExceptionHandler(Exception.class)

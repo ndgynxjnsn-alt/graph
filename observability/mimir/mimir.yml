@@ -31,13 +31,38 @@ ruler_storage:
     bucket_name: mimir-ruler
 
 # Single-replica everything (dev / single-node friendly).
+#
+# instance_addr is pinned to loopback on every ring: on Docker Swarm, tasks have
+# several interfaces (overlay + ingress when ports are published) and Mimir's
+# address autodetection can advertise the wrong one, breaking the rings
+# ("difficult time communicating among their own workers"). A monolithic Mimir
+# only needs to reach itself, so loopback is always correct.
 ingester:
   ring:
     replication_factor: 1
+    instance_addr: 127.0.0.1
+
+distributor:
+  ring:
+    instance_addr: 127.0.0.1
 
 store_gateway:
   sharding_ring:
     replication_factor: 1
+    instance_addr: 127.0.0.1
+
+compactor:
+  sharding_ring:
+    instance_addr: 127.0.0.1
+
+ruler:
+  ring:
+    instance_addr: 127.0.0.1
+
+# The rings above default to memberlist for coordination; bind that to loopback too.
+memberlist:
+  bind_addr: [127.0.0.1]
+  advertise_addr: 127.0.0.1
 
 # Accept remote-write from Alloy and Tempo, keep exemplars for trace correlation,
 # tolerate the slightly out-of-order samples that span metrics can produce.

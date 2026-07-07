@@ -13,7 +13,29 @@
       "Bash(python3 -c ' *)",
       "Bash(curl -s -G 'http://localhost:3100/loki/api/v1/query_range' --data-urlencode 'query={app=\"showcase\",level=\"INFO\"}' --data-urlencode 'limit=4')",
       "Bash(timeout 300 docker build -t showcase-app:latest .)",
-      "Bash(docker rm *)"
+      "Bash(docker rm *)",
+      "Bash(docker info *)",
+      "Bash(docker swarm *)",
+      "Bash(docker node *)",
+      "Bash(docker stop *)",
+      "Bash(docker stack *)",
+      "Bash(docker service *)",
+      "Read(//var/lib/docker/**)",
+      "Bash(touch /var/lib/docker/.wtest)",
+      "Bash(rm -f /var/lib/docker/.wtest)",
+      "Bash(snap list *)",
+      "Bash(snap connections *)",
+      "Bash(timeout 500 docker build -t showcase-app:latest .)",
+      "Bash(timeout 300 sh -c 'docker save showcase-app:latest | docker exec -i swarm-node docker load')",
+      "Bash(tar --exclude='./app' --exclude='./.git' -cf - .)",
+      "Bash(curl -sf 'http://localhost:9009/prometheus/api/v1/query?query=http_server_requests_seconds_count')",
+      "Bash(curl -s 'http://localhost:9009/prometheus/api/v1/query?query=sum+by+\\(status\\)\\(http_server_requests_seconds_count%7Bjob=%22showcase%22%7D\\)')",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); r=d['data']['result']; print\\('status classes:', {m['metric'].get\\('status'\\): m['value'][1] for m in r} if r else 'NO DATA'\\)\")",
+      "Bash(curl -s -G 'http://localhost:3100/loki/api/v1/query_range' --data-urlencode 'query={app=\"showcase\"}' --data-urlencode 'limit=2')",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); rs=d.get\\('data',{}\\).get\\('result',[]\\); print\\('log streams:',len\\(rs\\)\\); [print\\(' ',v[1][:100]\\) for s in rs[:1] for v in s['values'][:2]]\")",
+      "Bash(curl -s -G 'http://localhost:3200/api/search' --data-urlencode 'q={}' --data-urlencode 'limit=3')",
+      "Bash(python3 -c \"import json,sys; d=json.load\\(sys.stdin\\); t=d.get\\('traces',[]\\); print\\('traces found:',len\\(t\\)\\); [print\\(' ',x.get\\('rootServiceName'\\),x.get\\('rootTraceName'\\)\\) for x in t]\")",
+      "Bash(curl -s 'http://localhost:4040/pyroscope/api/apps')"
     ]
   }
 }
