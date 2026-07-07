@@ -187,3 +187,5 @@ unchanged on the swarm overlay network.
         ├── provisioning/         # datasources + dashboard provider
         └── dashboards/           # Spring Boot Showcase dashboard
 ```
+
+https://share.gemini.google/DHt6zAmhO2Nc
