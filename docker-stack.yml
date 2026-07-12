@@ -129,6 +129,11 @@ services:
     configs:
       - source: alloy_cfg
         target: /etc/alloy/config.alloy
+    volumes:
+      # Read-only Docker socket: discover containers and tail their logs.
+      # Multi-node: run Alloy as a global service (one per node) so every node's
+      # container logs are collected — see README.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     networks: [showcase]
     deploy:
       <<: *always-restart
@@ -191,9 +196,12 @@ services:
   # -------------------------------------------------------------------------
   app:
     image: showcase-app:latest
+    # Container label so Alloy's Docker discovery opts this app in for log scraping.
+    labels:
+      logging: "true"
     environment:
+      SPRING_PROFILES_ACTIVE: prod          # structured ECS JSON on stdout
       OTLP_TRACING_ENDPOINT: http://alloy:4318/v1/traces
-      LOKI_URL: http://loki:3100/loki/api/v1/push
       JAVA_OPTS: "-XX:MaxRAMPercentage=75.0"
       PYROSCOPE_SERVER_ADDRESS: http://pyroscope:4040
       PYROSCOPE_APPLICATION_NAME: showcase

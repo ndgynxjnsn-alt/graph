@@ -1,7 +1,8 @@
 // Grafana Alloy — the single collection point for the showcase.
 //
-//   metrics : scrape the app's /actuator/prometheus  ->  remote_write to Mimir
-//   traces  : receive OTLP from the app  ->  tail-sample (keep ALL failures)  ->  Tempo
+//   metrics : scrape the app's /actuator/prometheus       ->  remote_write to Mimir
+//   traces  : receive OTLP from the app                   ->  Tempo
+//   logs    : read opt-in containers' Docker log stream   ->  Loki
 
 logging {
   level  = "info"
@@ -77,5 +78,67 @@ otelcol.exporter.otlp "tempo" {
   client {
     endpoint = "tempo:4317"
     tls { insecure = true }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// LOGS: discover Docker containers, read their stdout/stderr off the Docker
+// daemon, parse the app's ECS JSON, and push to Loki.
+//
+// "Certain applications" = opt-in: only containers labelled `logging=true` are
+// collected (see the `app` service in docker-compose.yml / docker-stack.yml).
+// The app writes structured JSON in production (SPRING_PROFILES_ACTIVE=prod),
+// so we parse it into clean, low-cardinality labels and keep the raw JSON as the
+// log line (traceId stays in the line for the Grafana log->trace derived field).
+// ---------------------------------------------------------------------------
+discovery.docker "containers" {
+  host             = "unix:///var/run/docker.sock"
+  refresh_interval = "10s"
+}
+
+discovery.relabel "logs" {
+  targets = discovery.docker.containers.targets
+
+  // Only collect containers that explicitly opt in.
+  rule {
+    source_labels = ["__meta_docker_container_label_logging"]
+    regex         = "true"
+    action        = "keep"
+  }
+  // Human-friendly container label (strip Docker's leading slash).
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/?(.*)"
+    target_label  = "container"
+  }
+}
+
+loki.source.docker "containers" {
+  host       = "unix:///var/run/docker.sock"
+  targets    = discovery.relabel.logs.output
+  labels     = { job = "docker" }
+  forward_to = [loki.process.app.receiver]
+}
+
+loki.process "app" {
+  // Pull a couple of clean labels out of the ECS JSON; the raw JSON line is kept.
+  stage.json {
+    expressions = {
+      level        = "log.level",
+      service_name = "service.name",
+    }
+  }
+  stage.labels {
+    values = {
+      level = "",             // label `level`  <- extracted `level`
+      app   = "service_name", // label `app`    <- extracted `service.name` (== "showcase")
+    }
+  }
+  forward_to = [loki.write.default.receiver]
+}
+
+loki.write "default" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
   }
 }

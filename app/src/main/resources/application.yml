@@ -33,6 +33,24 @@ management:
       # OTLP/HTTP endpoint of the Alloy collector (override with MANAGEMENT_OTLP_TRACING_ENDPOINT)
       endpoint: ${OTLP_TRACING_ENDPOINT:http://localhost:4318/v1/traces}
 
-# Endpoint the Loki logback appender pushes to (see logback-spring.xml)
-loki:
-  url: ${LOKI_URL:http://localhost:3100/loki/api/v1/push}
+# Dev default: human-readable console. Spring Boot already appends the correlation
+# fields ([service,traceId,spanId]) to the console pattern when tracing is on the
+# classpath, so no custom logback is needed.
+
+---
+# Production profile (SPRING_PROFILES_ACTIVE=prod): emit structured ECS JSON to
+# stdout, one object per line. Grafana Alloy scrapes these lines off the Docker
+# log stream and ships them to Loki. MDC entries — including traceId / spanId from
+# Micrometer Tracing — are included automatically.
+spring:
+  config:
+    activate:
+      on-profile: prod
+  main:
+    # The ASCII banner is printed raw (not through the logging system); turn it
+    # off in prod so every stdout line is valid JSON.
+    banner-mode: "off"
+logging:
+  structured:
+    format:
+      console: ecs

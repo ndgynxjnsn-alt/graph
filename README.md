@@ -8,14 +8,19 @@ A self-contained observability demo: a small **Spring Boot 3** app (Java 25) ins
 requests so there is always something to look at.
 
 ```
-                 ┌────────── metrics (scrape /actuator/prometheus) ──────────┐
-                 │                                                            ▼
-  loadgen ──▶  app ──OTLP traces──▶ Alloy ──tail-sampled──▶ Tempo         Mimir
-                 │                    │  (keep ALL failures)   │             │
-                 └──push logs─────────┼────────────────────────┼─────────────┤
-                                      ▼                         ▼             ▼
-                                    Loki ───────────────── MinIO (S3) ── Grafana
+            metrics: Alloy scrapes /actuator/prometheus ─────────────▶ Mimir ─┐
+            traces:  app ──OTLP──▶ Alloy ────────────────────────────▶ Tempo ─┤
+            logs:    app ─JSON→stdout→ Docker ─Alloy tails─▶ ──────────▶ Loki ─┤
+            profiles: app ─(Pyroscope agent)──────────────────────▶ Pyroscope ┤
+                                                                               ▼
+   k6 ──▶ app                                    MinIO (S3) ◀── Mimir/Loki/Tempo
+                                                                            Grafana
 ```
+
+Metrics, logs and traces all flow through **one Grafana Alloy** collector: it scrapes the app's
+Prometheus endpoint, receives OTLP traces, and tails the app's container logs off the Docker
+daemon. The app itself only *emits* signals (Prometheus endpoint, OTLP, JSON on stdout, profiles);
+it has no direct connection to any backend.
 
 ## What you get
 
@@ -67,8 +72,7 @@ sends a steady mix of traffic, the 2xx / 4xx / 5xx panel and the error-rate stat
 ## The app
 
 Spring Boot 3.5 + Actuator, instrumented with Micrometer (Prometheus metrics), Micrometer Tracing
-→ OpenTelemetry (OTLP traces), and a Loki logback appender (structured logs with the `traceId`
-embedded). Endpoints:
+→ OpenTelemetry (OTLP traces), and structured logging (see below). Endpoints:
 
 | Endpoint | Behaviour |
 |----------|-----------|
@@ -104,15 +108,29 @@ curl -s -G http://localhost:3200/api/search --data-urlencode 'q={status=error}' 
 > healthy traffic. The trade-off is spelled out there: dropped successful traces will leave dead
 > log→trace links, because the drop happens after the log line was written.
 
-### Logs ↔ traces correlation
+### Logging: JSON in prod, console in dev — scraped by Alloy (not pushed by the app)
 
-Errors are handled by a `@RestControllerAdvice`
+The app does **not** ship logs anywhere itself. It just writes to stdout, and **Grafana Alloy
+tails the container's Docker log stream** and pushes to Loki. Two formats, chosen by profile:
+
+- **dev** (default, e.g. running from the IDE / `./mvnw spring-boot:run`): human-readable console,
+  with `[service,traceId,spanId]` appended by Spring Boot automatically.
+- **prod** (`SPRING_PROFILES_ACTIVE=prod`, set on the container): **structured ECS JSON**, one
+  object per line, via Spring Boot 3.4+ built-in structured logging (no logging dependencies). MDC
+  — including `traceId`/`spanId` — is included automatically.
+
+**"Certain applications" only.** Alloy's Docker discovery collects logs only from containers that
+opt in with the label `logging=true` (see the `app` service). It parses each ECS JSON line into
+low-cardinality Loki labels (`app`, `level`, `container`) and keeps the raw JSON as the log line —
+see [`observability/alloy/config.alloy`](observability/alloy/config.alloy). On multi-node swarm,
+run Alloy as a **global** service so every node's local container logs are collected.
+
+**Correlation.** Errors are handled by a `@RestControllerAdvice`
 ([`GlobalExceptionHandler`](app/src/main/java/com/example/showcase/GlobalExceptionHandler.java)) so
-they are logged *inside* the trace scope — every log line, success or failure, carries a real
-`traceId=<id>` (never `traceId=none`). The Loki datasource has a derived field that turns it into a
-clickable link straight to the trace in Tempo, and from a Tempo span you can jump back to the
-matching logs in Loki. Open **Explore → Loki**, query `{app="showcase"}`, expand a line and click
-the **TraceID** link.
+they are logged *inside* the trace scope — every log line carries a real `traceId`. The Loki
+datasource has a derived field that extracts `"traceId":"…"` from the JSON and turns it into a
+clickable link to the trace in Tempo; from a Tempo span you can jump back to the logs in Loki. Open
+**Explore → Loki**, query `{app="showcase"}`, expand a line and click the **TraceID** link.
 
 ## Continuous profiling (Pyroscope)
 
@@ -237,10 +255,10 @@ memberlist join on `tasks.<service>` with `endpoint_mode: dnsrr`.
 ├── docker-stack.yml              # swarm: same stack via `docker stack deploy` (swarm-tested)
 ├── app/                          # Spring Boot app + Dockerfile (incl. Pyroscope Java agent)
 │   ├── src/main/java/...         # controllers + error handling
-│   └── src/main/resources/       # application.yml, logback-spring.xml (Loki appender)
+│   └── src/main/resources/       # application.yml (dev=console, prod=structured ECS JSON)
 ├── k6/load.js                    # Grafana k6 load test
 └── observability/
-    ├── alloy/config.alloy        # scrape -> Mimir; OTLP -> Tempo
+    ├── alloy/config.alloy        # scrape metrics->Mimir; OTLP traces->Tempo; Docker logs->Loki
     ├── mimir/mimir.yml           # metrics, S3 backend (rings pinned to loopback for swarm)
     ├── loki/loki.yml             # logs, S3 backend (          "          )
     ├── tempo/tempo.yml           # traces, S3 backend (         "          )

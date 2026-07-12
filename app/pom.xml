@@ -16,7 +16,6 @@
 
 	<properties>
 		<java.version>25</java.version>
-		<loki-logback-appender.version>1.6.0</loki-logback-appender.version>
 	</properties>
 
 	<dependencies>
@@ -57,12 +56,8 @@
 			<artifactId>opentelemetry-api</artifactId>
 		</dependency>
 
-		<!-- Logs: push structured logs (with trace_id) directly to Loki -->
-		<dependency>
-			<groupId>com.github.loki4j</groupId>
-			<artifactId>loki-logback-appender</artifactId>
-			<version>${loki-logback-appender.version}</version>
-		</dependency>
+		<!-- Logs: the app just writes structured JSON to stdout (Spring Boot built-in
+		     structured logging); Grafana Alloy scrapes it off the Docker log stream. -->
 
 		<dependency>
 			<groupId>org.springframework.boot</groupId>

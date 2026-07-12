@@ -22,11 +22,12 @@ datasources:
     access: proxy
     url: http://loki:3100
     jsonData:
-      # Turn "traceId=<id>" in a log line into a clickable link to the trace in Tempo.
+      # Pull the traceId out of the ECS JSON log line and make it a clickable
+      # link to the trace in Tempo.
       derivedFields:
         - name: TraceID
           matcherType: regex
-          matcherRegex: 'traceId=(\w+)'
+          matcherRegex: '"traceId":"(\w+)"'
           url: '$${__value.raw}'
           datasourceUid: tempo
 

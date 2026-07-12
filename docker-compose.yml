@@ -111,6 +111,8 @@ services:
       - /etc/alloy/config.alloy
     volumes:
       - ./observability/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      # Read-only Docker socket: discover containers and tail their logs.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     ports:
       - "12345:12345"   # Alloy UI
     depends_on:
@@ -175,9 +177,13 @@ services:
     build:
       context: ./app
     image: showcase-app:latest
+    # `logging=true` opts this container in to Alloy's Docker log scraping.
+    labels:
+      logging: "true"
     environment:
+      # prod profile -> structured ECS JSON on stdout (scraped by Alloy)
+      SPRING_PROFILES_ACTIVE: prod
       OTLP_TRACING_ENDPOINT: http://alloy:4318/v1/traces
-      LOKI_URL: http://loki:3100/loki/api/v1/push
       JAVA_OPTS: "-XX:MaxRAMPercentage=75.0"
       # Pyroscope agent (baked into the image; only attaches when this is set)
       PYROSCOPE_SERVER_ADDRESS: http://pyroscope:4040
@@ -188,8 +194,6 @@ services:
       - "8080:8080"
     depends_on:
       alloy:
-        condition: service_started
-      loki:
         condition: service_started
       pyroscope:
         condition: service_started
