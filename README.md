@@ -266,3 +266,5 @@ memberlist join on `tasks.<service>` with `endpoint_mode: dnsrr`.
         ├── provisioning/         # datasources (Mimir/Loki/Tempo/Pyroscope) + dashboard provider
         └── dashboards/           # Spring Boot Showcase dashboard
 ```
+
+https://share.gemini.google/DHt6zAmhO2Nc
